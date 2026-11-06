@@ -5,6 +5,10 @@
  *   goes into the chat textarea; when you stop speaking, the message is sent
  *   automatically. Click the mic again while listening to cancel.
  * - Speaker button: toggle text-to-speech for new assistant replies.
+ * - Hands-free button (headset): voice-activated conversation. The mic opens
+ *   automatically, your speech is sent when you finish talking, the reply is
+ *   spoken aloud, and the mic re-opens when the reply ends. The setting is
+ *   remembered across page loads and the session resumes automatically.
  *
  * Injected into client/index.html by scripts/voice_patch.py at app startup,
  * before `npm run build`.
@@ -16,6 +20,7 @@
 
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   var TA_SEL = '[data-testid="multimodal-input"]';
+  var HF_KEY = 'voiceHandsFree';
 
   var style = document.createElement('style');
   style.textContent =
@@ -40,6 +45,12 @@
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
     '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>' +
     '<path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>';
+  var HF_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Z"/>' +
+    '<path d="M21 14h-3a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-5Z"/>' +
+    '<path d="M21 14v-2a9 9 0 0 0-18 0v2"/></svg>';
 
   function el(tag, cls, html) {
     var n = document.createElement(tag);
@@ -55,7 +66,9 @@
   micBtn.title = 'Voice command: click, speak, and your message is sent automatically';
   var ttsBtn = el('button', '', SPK_SVG);
   ttsBtn.title = 'Read agent replies aloud';
-  wrap.append(statusPill, micBtn, ttsBtn);
+  var hfBtn = el('button', '', HF_SVG);
+  hfBtn.title = 'Hands-free: voice-activated conversation with spoken replies';
+  wrap.append(statusPill, micBtn, ttsBtn, hfBtn);
   document.body.appendChild(wrap);
 
   function pill(msg, sticky) {
@@ -74,6 +87,12 @@
   var listening = false;
   var finalText = '';
   var autoSend = true;
+  var silentTurns = 0;
+  var handsFree = false;
+  var ttsOn = false;
+  var stableText = '';
+  var lastSpoken = '';
+  try { handsFree = window.localStorage.getItem(HF_KEY) === '1'; } catch (e) {}
 
   function setTA(text) {
     var ta = document.querySelector(TA_SEL);
@@ -102,16 +121,11 @@
     if (!statusPill.textContent) pill('');
   }
 
-  micBtn.addEventListener('click', function () {
-    if (listening) {
-      // second click cancels: stop and do not send
-      autoSend = false;
-      stopListening();
-      pill('Voice input cancelled');
-      return;
-    }
+  function startListening() {
+    if (listening) return;
     if (!SR) {
       pill('Speech recognition not supported here — use Chrome or Edge');
+      if (handsFree) setHandsFree(false);
       return;
     }
     finalText = '';
@@ -122,6 +136,7 @@
     recog.lang = navigator.language || 'en-US';
 
     recog.onresult = function (event) {
+      silentTurns = 0;
       var interim = '';
       for (var i = event.resultIndex; i < event.results.length; i++) {
         var r = event.results[i];
@@ -140,19 +155,35 @@
         'audio-capture': 'No microphone found'
       };
       if (e.error !== 'aborted') pill(messages[e.error] || 'Voice error: ' + e.error);
+      if (handsFree && (e.error === 'not-allowed' || e.error === 'audio-capture' || e.error === 'network')) {
+        setHandsFree(false);
+      }
     };
 
     recog.onend = function () {
       micBtn.classList.remove('on');
       listening = false;
       if (autoSend && finalText.trim()) {
+        silentTurns = 0;
         setTimeout(function () {
           setTA(finalText.trim());
           sendMessage();
           pill('');
         }, 250);
-      } else if (!finalText.trim() && autoSend) {
-        pill('');
+      } else if (handsFree) {
+        // Silent or cancelled turn: keep the hands-free session alive and
+        // re-open the mic for another attempt. After several silent turns in
+        // a row, pause so the microphone does not stay on forever.
+        silentTurns++;
+        if (silentTurns >= 5) {
+          silentTurns = 0;
+          setHandsFree(false);
+          pill('Hands-free paused after silence — click the headset to resume');
+        } else {
+          setTimeout(function () {
+            if (handsFree && !listening) startListening();
+          }, 900);
+        }
       }
       finalText = '';
     };
@@ -164,14 +195,72 @@
       pill('Listening…', true);
     } catch (e) {
       pill('Could not start the microphone');
+      if (handsFree) setHandsFree(false);
     }
+  }
+
+  micBtn.addEventListener('click', function () {
+    if (handsFree) {
+      // In hands-free mode the mic button pauses or resumes the session.
+      if (listening) setHandsFree(false);
+      else startListening();
+      return;
+    }
+    if (listening) {
+      // second click cancels: stop and do not send
+      autoSend = false;
+      stopListening();
+      pill('Voice input cancelled');
+      return;
+    }
+    startListening();
   });
 
-  /* ---------- text-to-speech for replies ---------- */
+  /* ---------- hands-free (voice-activated) mode ---------- */
 
-  var ttsOn = false;
-  var stableText = '';
-  var lastSpoken = '';
+  function setHandsFree(on) {
+    handsFree = on;
+    try { window.localStorage.setItem(HF_KEY, on ? '1' : '0'); } catch (e) {}
+    hfBtn.classList.toggle('on', on);
+    if (on) {
+      if (window.speechSynthesis) {
+        ttsOn = true;
+        ttsBtn.classList.add('on');
+      }
+      pill('Hands-free on — speak now', true);
+      startListening();
+    } else {
+      autoSend = false;
+      stopListening();
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      ttsOn = false;
+      ttsBtn.classList.remove('on');
+      pill('Hands-free off');
+    }
+  }
+
+  hfBtn.addEventListener('click', function () {
+    setHandsFree(!handsFree);
+  });
+
+  // Resume a saved hands-free session when the page loads. Some browsers
+  // need one click on the page first (microphone / autoplay policy); a
+  // one-time document click retries in that case.
+  if (handsFree) {
+    hfBtn.classList.add('on');
+    if (window.speechSynthesis) {
+      ttsOn = true;
+      ttsBtn.classList.add('on');
+    }
+    setTimeout(function () {
+      if (handsFree && !listening) startListening();
+    }, 1000);
+    document.addEventListener('click', function () {
+      if (handsFree && !listening) startListening();
+    }, { once: true });
+  }
+
+  /* ---------- text-to-speech for replies ---------- */
 
   ttsBtn.addEventListener('click', function () {
     ttsOn = !ttsOn;
@@ -200,7 +289,7 @@
   }
 
   setInterval(function () {
-    if (!ttsOn || !('speechSynthesis' in window)) return;
+    if (!('speechSynthesis' in window)) return;
     if (document.querySelector('[data-testid="message-assistant-loading"]')) {
       stableText = ''; // still generating; wait for it to settle
       return;
@@ -210,15 +299,24 @@
     var content = msgs[msgs.length - 1].querySelector('[data-testid="message-content"]');
     var text = cleanReplyText((content || msgs[msgs.length - 1]).innerText || '');
     if (!text) return;
-    if (text === stableText) {
-      if (text !== lastSpoken && !window.speechSynthesis.speaking) {
-        lastSpoken = text;
-        var u = new SpeechSynthesisUtterance(text.slice(0, 2000));
-        u.lang = navigator.language || 'en-US';
-        window.speechSynthesis.speak(u);
-      }
-    } else {
+    if (text !== stableText) {
       stableText = text; // remember and re-check after streaming settles
+      return;
+    }
+    if (text === lastSpoken) return;
+    // The reply has settled. Speak it when enabled; in hands-free mode the
+    // microphone re-opens once the spoken reply has finished.
+    if (ttsOn && !window.speechSynthesis.speaking) {
+      lastSpoken = text;
+      var u = new SpeechSynthesisUtterance(text.slice(0, 2000));
+      u.lang = navigator.language || 'en-US';
+      u.onend = function () {
+        if (handsFree && !listening) setTimeout(startListening, 400);
+      };
+      window.speechSynthesis.speak(u);
+    } else if (handsFree && !listening) {
+      lastSpoken = text;
+      setTimeout(startListening, 400);
     }
   }, 1200);
 })();
