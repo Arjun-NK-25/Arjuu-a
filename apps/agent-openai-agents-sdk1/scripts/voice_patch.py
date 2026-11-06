@@ -78,6 +78,26 @@ def inject_voice(frontend_dir: Path) -> bool:
                     input_tsx.write_text(patched)
                     print("✓ Empty-message submit guard added to chat input.")
 
+        # 1d. JARVIS-style suggested actions for the chat UI.
+        actions_tsx = src_dir / "components" / "suggested-actions.tsx"
+        if actions_tsx.is_file():
+            actions_text = actions_tsx.read_text()
+            if "JARVIS" not in actions_text:
+                patched = actions_text.replace(
+                    "  const suggestedActions = [\n"
+                    "    'How can you help me?',\n"
+                    "    'Tell me something I might not know',\n"
+                    "  ];",
+                    "  const suggestedActions = [\n"
+                    "    'Good evening, JARVIS. What can you do for me?',\n"
+                    "    'JARVIS, what is the current time?',\n"
+                    "  ];",
+                    1,
+                )
+                if patched != actions_text:
+                    actions_tsx.write_text(patched)
+                    print("✓ JARVIS suggested actions installed in chat UI.")
+
         # 2. Load the script from the page as well (idempotent)
         index_path = client / "index.html"
         html = index_path.read_text()
